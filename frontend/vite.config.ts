@@ -19,12 +19,19 @@ export default defineConfig({
   css: {
     preprocessorOptions: {
       scss: {
-        additionalData: `
-          @use "./src/scss/variables" as *;
-          @use "./src/scss/mixins";
-        `,
+        additionalData: (content: string, filename: string) => {
+          const normalized = filename.replace(/\\/g, '/')
+          if (
+            normalized.includes('/scss/_variables.scss') ||
+            normalized.includes('/scss/mixins/')
+          ) {
+            return content
+          }
+          const variables = resolve(__dirname, 'src/scss/_variables.scss').replace(/\\/g, '/')
+          const mixins = resolve(__dirname, 'src/scss/mixins').replace(/\\/g, '/')
+          return `@use "${variables}" as *;\n@use "${mixins}";\n${content}`
+        },
       },
-
     }
   },
 

@@ -1,8 +1,27 @@
 import { NextFunction, Request, Response } from 'express'
 import { FilterQuery } from 'mongoose'
+import BadRequestError from '../errors/bad-request-error'
 import NotFoundError from '../errors/not-found-error'
 import Order from '../models/order'
 import User, { IUser } from '../models/user'
+import escapeRegExp from '../utils/escapeRegExp'
+import { parsePagination, parseSort } from '../utils/pagination'
+
+const toFiniteNumber = (value: unknown) => {
+    if (typeof value !== 'string' && typeof value !== 'number') {
+        return undefined
+    }
+    const number = Number(value)
+    return Number.isFinite(number) ? number : undefined
+}
+
+const toValidDate = (value: unknown) => {
+    if (typeof value !== 'string' || value.length > 40) {
+        return undefined
+    }
+    const date = new Date(value)
+    return Number.isNaN(date.getTime()) ? undefined : date
+}
 
 // TODO: Добавить guard admin
 // eslint-disable-next-line max-len
@@ -14,8 +33,6 @@ export const getCustomers = async (
 ) => {
     try {
         const {
-            page = 1,
-            limit = 10,
             sortField = 'createdAt',
             sortOrder = 'desc',
             registrationDateFrom,
@@ -28,18 +45,25 @@ export const getCustomers = async (
             orderCountTo,
             search,
         } = req.query
+        const { page, limit, skip } = parsePagination(
+            req.query.page,
+            req.query.limit,
+            10,
+            10
+        )
 
         const filters: FilterQuery<Partial<IUser>> = {}
 
-        if (registrationDateFrom) {
+        const registrationFrom = toValidDate(registrationDateFrom)
+        const registrationTo = toValidDate(registrationDateTo)
+        if (registrationFrom) {
             filters.createdAt = {
                 ...filters.createdAt,
-                $gte: new Date(registrationDateFrom as string),
+                $gte: registrationFrom,
             }
         }
-
-        if (registrationDateTo) {
-            const endOfDay = new Date(registrationDateTo as string)
+        if (registrationTo) {
+            const endOfDay = new Date(registrationTo)
             endOfDay.setHours(23, 59, 59, 999)
             filters.createdAt = {
                 ...filters.createdAt,
@@ -47,15 +71,16 @@ export const getCustomers = async (
             }
         }
 
-        if (lastOrderDateFrom) {
+        const lastFrom = toValidDate(lastOrderDateFrom)
+        const lastTo = toValidDate(lastOrderDateTo)
+        if (lastFrom) {
             filters.lastOrderDate = {
                 ...filters.lastOrderDate,
-                $gte: new Date(lastOrderDateFrom as string),
+                $gte: lastFrom,
             }
         }
-
-        if (lastOrderDateTo) {
-            const endOfDay = new Date(lastOrderDateTo as string)
+        if (lastTo) {
+            const endOfDay = new Date(lastTo)
             endOfDay.setHours(23, 59, 59, 999)
             filters.lastOrderDate = {
                 ...filters.lastOrderDate,
@@ -63,36 +88,45 @@ export const getCustomers = async (
             }
         }
 
-        if (totalAmountFrom) {
+        const amountFrom = toFiniteNumber(totalAmountFrom)
+        const amountTo = toFiniteNumber(totalAmountTo)
+        if (amountFrom !== undefined) {
             filters.totalAmount = {
                 ...filters.totalAmount,
-                $gte: Number(totalAmountFrom),
+                $gte: amountFrom,
             }
         }
-
-        if (totalAmountTo) {
+        if (amountTo !== undefined) {
             filters.totalAmount = {
                 ...filters.totalAmount,
-                $lte: Number(totalAmountTo),
+                $lte: amountTo,
             }
         }
 
-        if (orderCountFrom) {
+        const countFrom = toFiniteNumber(orderCountFrom)
+        const countTo = toFiniteNumber(orderCountTo)
+        if (countFrom !== undefined) {
             filters.orderCount = {
                 ...filters.orderCount,
-                $gte: Number(orderCountFrom),
+                $gte: countFrom,
             }
         }
-
-        if (orderCountTo) {
+        if (countTo !== undefined) {
             filters.orderCount = {
                 ...filters.orderCount,
-                $lte: Number(orderCountTo),
+                $lte: countTo,
             }
         }
 
-        if (search) {
-            const searchRegex = new RegExp(search as string, 'i')
+        if (search !== undefined && typeof search !== 'string') {
+            return next(new BadRequestError('Некорректный поисковый запрос'))
+        }
+
+        if (typeof search === 'string' && search.length > 0) {
+            const searchRegex = new RegExp(
+                escapeRegExp(search.slice(0, 100)),
+                'i'
+            )
             const orders = await Order.find(
                 {
                     $or: [{ deliveryAddress: searchRegex }],
@@ -108,16 +142,17 @@ export const getCustomers = async (
             ]
         }
 
-        const sort: { [key: string]: any } = {}
-
-        if (sortField && sortOrder) {
-            sort[sortField as string] = sortOrder === 'desc' ? -1 : 1
-        }
+        const sort = parseSort(
+            sortField,
+            sortOrder,
+            ['createdAt', 'name', 'totalAmount', 'orderCount', 'lastOrderDate'],
+            'createdAt'
+        )
 
         const options = {
             sort,
-            skip: (Number(page) - 1) * Number(limit),
-            limit: Number(limit),
+            skip,
+            limit,
         }
 
         const users = await User.find(filters, null, options).populate([
@@ -137,15 +172,15 @@ export const getCustomers = async (
         ])
 
         const totalUsers = await User.countDocuments(filters)
-        const totalPages = Math.ceil(totalUsers / Number(limit))
+        const totalPages = Math.ceil(totalUsers / limit)
 
         res.status(200).json({
             customers: users,
             pagination: {
                 totalUsers,
                 totalPages,
-                currentPage: Number(page),
-                pageSize: Number(limit),
+                currentPage: page,
+                pageSize: limit,
             },
         })
     } catch (error) {
@@ -179,11 +214,24 @@ export const updateCustomer = async (
     next: NextFunction
 ) => {
     try {
+        const { name, email, phone } = req.body ?? {}
+        const update: { name?: string; email?: string; phone?: string } = {}
+        if (typeof name === 'string') {
+            update.name = name
+        }
+        if (typeof email === 'string') {
+            update.email = email
+        }
+        if (typeof phone === 'string') {
+            update.phone = phone
+        }
+
         const updatedUser = await User.findByIdAndUpdate(
             req.params.id,
-            req.body,
+            update,
             {
                 new: true,
+                runValidators: true,
             }
         )
             .orFail(

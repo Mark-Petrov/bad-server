@@ -1,22 +1,36 @@
 import { NextFunction, Request, Response } from 'express'
 import fs from 'fs'
 import path from 'path'
+import { isInsideDirectory } from '../utils/safePath'
 
 export default function serveStatic(baseDir: string) {
-    return (req: Request, res: Response, next: NextFunction) => {
-        // Определяем полный путь к запрашиваемому файлу
-        const filePath = path.join(baseDir, req.path)
+    const root = path.resolve(baseDir)
 
-        // Проверяем, существует ли файл
+    return (req: Request, res: Response, next: NextFunction) => {
+        let relativePath = req.path
+        try {
+            relativePath = decodeURIComponent(req.path)
+        } catch (_error) {
+            return next()
+        }
+
+        if (relativePath.includes('\0')) {
+            return next()
+        }
+
+        const filePath = path.resolve(root, `.${relativePath}`)
+        if (!isInsideDirectory(root, filePath)) {
+            return next()
+        }
+
         fs.access(filePath, fs.constants.F_OK, (err) => {
             if (err) {
-                // Файл не существует отдаем дальше мидлварам
                 return next()
             }
-            // Файл существует, отправляем его клиенту
-            return res.sendFile(filePath, (err) => {
-                if (err) {
-                    next(err)
+            res.setHeader('Cache-Control', 'public, max-age=86400')
+            return res.sendFile(filePath, (sendError) => {
+                if (sendError) {
+                    next(sendError)
                 }
             })
         })

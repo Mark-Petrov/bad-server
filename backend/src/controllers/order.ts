@@ -2,9 +2,28 @@ import { NextFunction, Request, Response } from 'express'
 import { FilterQuery, Error as MongooseError, Types } from 'mongoose'
 import BadRequestError from '../errors/bad-request-error'
 import NotFoundError from '../errors/not-found-error'
-import Order, { IOrder } from '../models/order'
+import Order, { IOrder, StatusType } from '../models/order'
 import Product, { IProduct } from '../models/product'
 import User from '../models/user'
+import escapeRegExp from '../utils/escapeRegExp'
+import sanitizeRichText from '../utils/sanitizeRichText'
+import { parsePagination, parseSort } from '../utils/pagination'
+
+const toFiniteNumber = (value: unknown) => {
+    if (typeof value !== 'string' && typeof value !== 'number') {
+        return undefined
+    }
+    const number = Number(value)
+    return Number.isFinite(number) ? number : undefined
+}
+
+const toValidDate = (value: unknown) => {
+    if (typeof value !== 'string' || value.length > 40) {
+        return undefined
+    }
+    const date = new Date(value)
+    return Number.isNaN(date.getTime()) ? undefined : date
+}
 
 // eslint-disable-next-line max-len
 // GET /orders?page=2&limit=5&sort=totalAmount&order=desc&orderDateFrom=2024-07-01&orderDateTo=2024-08-01&status=delivering&totalAmountFrom=100&totalAmountTo=1000&search=%2B1
@@ -16,8 +35,6 @@ export const getOrders = async (
 ) => {
     try {
         const {
-            page = 1,
-            limit = 10,
             sortField = 'createdAt',
             sortOrder = 'desc',
             status,
@@ -27,43 +44,52 @@ export const getOrders = async (
             orderDateTo,
             search,
         } = req.query
+        const { page, limit, skip } = parsePagination(
+            req.query.page,
+            req.query.limit,
+            10,
+            10
+        )
 
         const filters: FilterQuery<Partial<IOrder>> = {}
 
-        if (status) {
-            if (typeof status === 'object') {
-                Object.assign(filters, status)
+        if (status !== undefined) {
+            if (
+                typeof status !== 'string' ||
+                !Object.values(StatusType).includes(status as StatusType)
+            ) {
+                return next(new BadRequestError('Передан некорректный статус'))
             }
-            if (typeof status === 'string') {
-                filters.status = status
-            }
+            filters.status = status
         }
 
-        if (totalAmountFrom) {
+        const amountFrom = toFiniteNumber(totalAmountFrom)
+        const amountTo = toFiniteNumber(totalAmountTo)
+        if (amountFrom !== undefined) {
             filters.totalAmount = {
                 ...filters.totalAmount,
-                $gte: Number(totalAmountFrom),
+                $gte: amountFrom,
             }
         }
-
-        if (totalAmountTo) {
+        if (amountTo !== undefined) {
             filters.totalAmount = {
                 ...filters.totalAmount,
-                $lte: Number(totalAmountTo),
+                $lte: amountTo,
             }
         }
 
-        if (orderDateFrom) {
+        const dateFrom = toValidDate(orderDateFrom)
+        const dateTo = toValidDate(orderDateTo)
+        if (dateFrom) {
             filters.createdAt = {
                 ...filters.createdAt,
-                $gte: new Date(orderDateFrom as string),
+                $gte: dateFrom,
             }
         }
-
-        if (orderDateTo) {
+        if (dateTo) {
             filters.createdAt = {
                 ...filters.createdAt,
-                $lte: new Date(orderDateTo as string),
+                $lte: dateTo,
             }
         }
 
@@ -89,8 +115,11 @@ export const getOrders = async (
             { $unwind: '$products' },
         ]
 
-        if (search) {
-            const searchRegex = new RegExp(search as string, 'i')
+        if (typeof search === 'string' && search.length > 0) {
+            const searchRegex = new RegExp(
+                escapeRegExp(search.slice(0, 100)),
+                'i'
+            )
             const searchNumber = Number(search)
 
             const searchConditions: any[] = [{ 'products.title': searchRegex }]
@@ -108,16 +137,17 @@ export const getOrders = async (
             filters.$or = searchConditions
         }
 
-        const sort: { [key: string]: any } = {}
-
-        if (sortField && sortOrder) {
-            sort[sortField as string] = sortOrder === 'desc' ? -1 : 1
-        }
+        const sort = parseSort(
+            sortField,
+            sortOrder,
+            ['createdAt', 'totalAmount', 'orderNumber', 'status'],
+            'createdAt'
+        )
 
         aggregatePipeline.push(
             { $sort: sort },
-            { $skip: (Number(page) - 1) * Number(limit) },
-            { $limit: Number(limit) },
+            { $skip: skip },
+            { $limit: limit },
             {
                 $group: {
                     _id: '$_id',
@@ -133,15 +163,15 @@ export const getOrders = async (
 
         const orders = await Order.aggregate(aggregatePipeline)
         const totalOrders = await Order.countDocuments(filters)
-        const totalPages = Math.ceil(totalOrders / Number(limit))
+        const totalPages = Math.ceil(totalOrders / limit)
 
         res.status(200).json({
             orders,
             pagination: {
                 totalOrders,
                 totalPages,
-                currentPage: Number(page),
-                pageSize: Number(limit),
+                currentPage: page,
+                pageSize: limit,
             },
         })
     } catch (error) {
@@ -156,11 +186,13 @@ export const getOrdersCurrentUser = async (
 ) => {
     try {
         const userId = res.locals.user._id
-        const { search, page = 1, limit = 5 } = req.query
-        const options = {
-            skip: (Number(page) - 1) * Number(limit),
-            limit: Number(limit),
-        }
+        const { search } = req.query
+        const { page, limit, skip } = parsePagination(
+            req.query.page,
+            req.query.limit,
+            5,
+            10
+        )
 
         const user = await User.findById(userId)
             .populate({
@@ -183,9 +215,11 @@ export const getOrdersCurrentUser = async (
 
         let orders = user.orders as unknown as IOrder[]
 
-        if (search) {
-            // если не экранировать то получаем Invalid regular expression: /+1/i: Nothing to repeat
-            const searchRegex = new RegExp(search as string, 'i')
+        if (typeof search === 'string' && search.length > 0) {
+            const searchRegex = new RegExp(
+                escapeRegExp(search.slice(0, 100)),
+                'i'
+            )
             const searchNumber = Number(search)
             const products = await Product.find({ title: searchRegex })
             const productIds = products.map((product) => product._id)
@@ -205,17 +239,17 @@ export const getOrdersCurrentUser = async (
         }
 
         const totalOrders = orders.length
-        const totalPages = Math.ceil(totalOrders / Number(limit))
+        const totalPages = Math.ceil(totalOrders / limit)
 
-        orders = orders.slice(options.skip, options.skip + options.limit)
+        orders = orders.slice(skip, skip + limit)
 
         return res.send({
             orders,
             pagination: {
                 totalOrders,
                 totalPages,
-                currentPage: Number(page),
-                pageSize: Number(limit),
+                currentPage: page,
+                pageSize: limit,
             },
         })
     } catch (error) {
@@ -289,10 +323,15 @@ export const createOrder = async (
 ) => {
     try {
         const basket: IProduct[] = []
-        const products = await Product.find<IProduct>({})
         const userId = res.locals.user._id
         const { address, payment, phone, total, email, items, comment } =
             req.body
+
+        if (!Array.isArray(items)) {
+            return next(new BadRequestError('Не указаны товары'))
+        }
+
+        const products = await Product.find<IProduct>({ _id: { $in: items } })
 
         items.forEach((id: Types.ObjectId) => {
             const product = products.find((p) => p._id.equals(id))
@@ -315,7 +354,10 @@ export const createOrder = async (
             payment,
             phone,
             email,
-            comment,
+            comment:
+                typeof comment === 'string'
+                    ? sanitizeRichText(comment).slice(0, 1000)
+                    : '',
             customer: userId,
             deliveryAddress: address,
         })
