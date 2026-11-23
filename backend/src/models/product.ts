@@ -1,6 +1,7 @@
 import { unlink } from 'fs'
 import mongoose, { Document } from 'mongoose'
 import { join } from 'path'
+import { safePublicImagePath } from '../utils/safePath'
 
 export interface IFile {
     fileName: string
@@ -53,19 +54,29 @@ cardsSchema.pre('findOneAndUpdate', async function deleteOldImage() {
     // @ts-ignore
     const updateImage = this.getUpdate().$set?.image
     const docToUpdate = await this.model.findOne(this.getQuery())
-    if (updateImage && docToUpdate) {
-        unlink(
-            join(__dirname, `../public/${docToUpdate.image.fileName}`),
-            (err) => console.log(err)
+    if (updateImage && docToUpdate?.image?.fileName) {
+        const imagePath = safePublicImagePath(
+            join(__dirname, '../public'),
+            docToUpdate.image.fileName
         )
+        if (imagePath) {
+            unlink(imagePath, () => undefined)
+        }
     }
 })
 
 // Можно лучше: удалять файл с изображением после удаление сущности
 cardsSchema.post('findOneAndDelete', async (doc: IProduct) => {
-    unlink(join(__dirname, `../public/${doc.image.fileName}`), (err) =>
-        console.log(err)
+    if (!doc?.image?.fileName) {
+        return
+    }
+    const imagePath = safePublicImagePath(
+        join(__dirname, '../public'),
+        doc.image.fileName
     )
+    if (imagePath) {
+        unlink(imagePath, () => undefined)
+    }
 })
 
 export default mongoose.model<IProduct>('product', cardsSchema)

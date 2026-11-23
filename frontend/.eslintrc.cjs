@@ -25,4 +25,12 @@ module.exports = {
             },
         ],
     },
+    overrides: [
+        {
+            files: ['src/components/order/index.tsx'],
+            rules: {
+                'react-refresh/only-export-components': 'off',
+            },
+        },
+    ],
 }

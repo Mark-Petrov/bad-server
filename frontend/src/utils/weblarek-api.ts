@@ -55,9 +55,29 @@ class Api {
 
     protected async request<T>(endpoint: string, options: RequestInit) {
         try {
+            const method = (options.method ?? 'GET').toUpperCase()
+            const headers = new Headers({
+                ...(this.options.headers as Record<string, string>),
+                ...(options.headers as Record<string, string>),
+            })
+
+            if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+                const csrfResponse = await fetch(
+                    `${this.baseUrl}/auth/csrf-token`,
+                    { credentials: 'include' }
+                )
+                const csrfData = await csrfResponse.json()
+                if (!csrfResponse.ok || !csrfData?.csrfToken) {
+                    return Promise.reject(csrfData)
+                }
+                headers.set('X-CSRF-Token', csrfData.csrfToken)
+            }
+
             const res = await fetch(`${this.baseUrl}${endpoint}`, {
                 ...this.options,
                 ...options,
+                headers,
+                credentials: options.credentials ?? 'include',
             })
             return await this.handleResponse<T>(res)
         } catch (error) {
@@ -78,7 +98,7 @@ class Api {
     ) => {
         try {
             return await this.request<T>(endpoint, options)
-        } catch (error) {
+        } catch (_error) {
             const refreshData = await this.refreshToken()
             if (!refreshData.success) {
                 return Promise.reject(refreshData)

@@ -5,31 +5,65 @@ import { join } from 'path'
 import BadRequestError from '../errors/bad-request-error'
 import ConflictError from '../errors/conflict-error'
 import NotFoundError from '../errors/not-found-error'
-import Product from '../models/product'
+import Product, { IFile } from '../models/product'
 import movingFile from '../utils/movingFile'
+import { parsePagination } from '../utils/pagination'
+import { clearResponseCache, getResponseCache, setResponseCache } from '../utils/responseCache'
+import { safeFileName } from '../utils/safePath'
 
 // GET /product
 const getProducts = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        const { page = 1, limit = 5 } = req.query
+        const { page, limit, skip } = parsePagination(
+            req.query.page,
+            req.query.limit,
+            5,
+            50
+        )
+        const cacheKey = `products:${page}:${limit}`
+        const cached = getResponseCache(cacheKey)
+        res.setHeader('Cache-Control', 'public, max-age=15')
+        if (cached) {
+            return res.send(cached)
+        }
         const options = {
-            skip: (Number(page) - 1) * Number(limit),
-            limit: Number(limit),
+            skip,
+            limit,
         }
         const products = await Product.find({}, null, options)
         const totalProducts = await Product.countDocuments({})
-        const totalPages = Math.ceil(totalProducts / Number(limit))
-        return res.send({
+        const totalPages = Math.ceil(totalProducts / limit)
+        const body = {
             items: products,
             pagination: {
                 totalProducts,
                 totalPages,
-                currentPage: Number(page),
-                pageSize: Number(limit),
+                currentPage: page,
+                pageSize: limit,
             },
-        })
+        }
+        setResponseCache(cacheKey, body)
+        return res.send(body)
     } catch (err) {
         return next(err)
+    }
+}
+
+const normalizeImage = (image: IFile) => {
+    const fileName = safeFileName(image.fileName)
+    if (!fileName) {
+        throw new BadRequestError('Некорректное имя файла')
+    }
+
+    movingFile(
+        fileName,
+        join(__dirname, `../public/${process.env.UPLOAD_PATH_TEMP}`),
+        join(__dirname, `../public/${process.env.UPLOAD_PATH}`)
+    )
+
+    return {
+        fileName: `/${process.env.UPLOAD_PATH}/${fileName}`,
+        originalName: safeFileName(image.originalName || 'image') || 'image',
     }
 }
 
@@ -41,19 +75,12 @@ const createProduct = async (
 ) => {
     try {
         const { description, category, price, title, image } = req.body
+        const safeImage = image ? normalizeImage(image) : image
 
-        // Переносим картинку из временной папки
-        if (image) {
-            movingFile(
-                image.fileName,
-                join(__dirname, `../public/${process.env.UPLOAD_PATH_TEMP}`),
-                join(__dirname, `../public/${process.env.UPLOAD_PATH}`)
-            )
-        }
-
+        clearResponseCache()
         const product = await Product.create({
             description,
-            image,
+            image: safeImage,
             category,
             price,
             title,
@@ -81,25 +108,36 @@ const updateProduct = async (
 ) => {
     try {
         const { productId } = req.params
-        const { image } = req.body
+        const { image, title, description, category, price } = req.body
+        const update: {
+            title?: string
+            description?: string
+            category?: string
+            price?: number | null
+            image?: IFile
+        } = {}
 
-        // Переносим картинку из временной папки
+        if (typeof title === 'string') {
+            update.title = title
+        }
+        if (typeof description === 'string') {
+            update.description = description
+        }
+        if (typeof category === 'string') {
+            update.category = category
+        }
+        if (price === null || typeof price === 'number') {
+            update.price = price
+        }
         if (image) {
-            movingFile(
-                image.fileName,
-                join(__dirname, `../public/${process.env.UPLOAD_PATH_TEMP}`),
-                join(__dirname, `../public/${process.env.UPLOAD_PATH}`)
-            )
+            update.image = normalizeImage(image)
         }
 
+        clearResponseCache()
         const product = await Product.findByIdAndUpdate(
             productId,
             {
-                $set: {
-                    ...req.body,
-                    price: req.body.price ? req.body.price : null,
-                    image: req.body.image ? req.body.image : undefined,
-                },
+                $set: update,
             },
             { runValidators: true, new: true }
         ).orFail(() => new NotFoundError('Нет товара по заданному id'))
@@ -129,6 +167,7 @@ const deleteProduct = async (
 ) => {
     try {
         const { productId } = req.params
+        clearResponseCache()
         const product = await Product.findByIdAndDelete(productId).orFail(
             () => new NotFoundError('Нет товара по заданному id')
         )
