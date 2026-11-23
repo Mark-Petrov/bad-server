@@ -1,5 +1,10 @@
 # Проектная работа "WebLarek. Плохой сервер.", спринт 17
 
+- Репозиторий: https://github.com/Mark-Petrov/bad-server
+- Автор: Mark-Petrov
+- Когорта: -
+- Опубликованная версия: локальный адрес http://localhost/
+
 ## Подготовка к работе
 1. Склонировать репозиторий
 2. Запустить docker
@@ -7,8 +12,7 @@
 docker compose up -d
 ```
 3. Наполнить базу данных
-[README.md](.dump%2FREADME.md)
+    [README.md](.dump/README.md)
 4. Перейти по адресу http://localhost/ и на странице должны быть продукты.
 5. На странице http://localhost/login/ можно авторизоваться.
 6. Админка находится по адресу http://localhost/admin/
-
